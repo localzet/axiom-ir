@@ -13,13 +13,10 @@ fn main() -> Result<()> {
 
     match command.as_str() {
         "inspect" => {
-            println!("module: {}", doc.get("module").unwrap());
-            println!(
-                "domain: {}..{}",
-                doc.get("domain.min").unwrap(),
-                doc.get("domain.max").unwrap()
-            );
-            println!("sha256: {}", hex_sha256(canonical.as_bytes()));
+            println!("module: {}", doc["module"]);
+            println!("input: {} : {}", doc["input.0.name"], doc["input.0.type"]);
+            println!("domain: {}", domain_summary(&doc)?);
+            println!("sha256: {}", sha256_hex(canonical.as_bytes()));
         }
         "canonical" => {
             if args.next().as_deref() != Some("--out") {
@@ -30,24 +27,29 @@ fn main() -> Result<()> {
         }
         _ => bail!("usage: axiom-ir <inspect|canonical> <input.aix> [--out path]"),
     }
+
     Ok(())
 }
 
 fn parse(raw: &str) -> Result<BTreeMap<String, String>> {
     let mut lines = raw.lines();
-    if lines.next() != Some("AXIOM-IR/1") {
-        bail!("invalid or unsupported IR header");
+    if lines.next() != Some("AXIOM-IR/2") {
+        bail!("invalid or unsupported IR header; expected AXIOM-IR/2");
     }
+
     let mut doc = BTreeMap::new();
-    for (i, line) in lines.enumerate() {
+    for (index, line) in lines.enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let (key, value) = line
             .split_once('=')
-            .with_context(|| format!("line {} has no '='", i + 2))?;
-        if doc.insert(key.to_owned(), value.to_owned()).is_some() {
+            .with_context(|| format!("line {} has no '='", index + 2))?;
+        if doc
+            .insert(key.to_owned(), value.trim().to_owned())
+            .is_some()
+        {
             bail!("duplicate key: {key}");
         }
     }
@@ -57,56 +59,93 @@ fn parse(raw: &str) -> Result<BTreeMap<String, String>> {
 fn validate(doc: &BTreeMap<String, String>) -> Result<()> {
     for key in [
         "module",
-        "input.name",
-        "input.type",
+        "input.0.name",
+        "input.0.type",
         "output.name",
         "output.type",
-        "domain.min",
-        "domain.max",
     ] {
         if !doc.contains_key(key) {
             bail!("missing required key: {key}");
         }
     }
-    if doc.get("input.type").map(String::as_str) != Some("i64")
-        || doc.get("output.type").map(String::as_str) != Some("i64")
+
+    if doc["input.0.type"] != "int" || doc["output.type"] != "int" {
+        bail!("IR/2 symbolic core supports int -> int only");
+    }
+    if !doc
+        .keys()
+        .any(|key| key.starts_with("ensures.") && key.ends_with(".expr"))
     {
-        bail!("IR/1 supports i64 -> i64 only");
+        bail!("specification has no ensures expressions");
     }
-    let min: i64 = doc["domain.min"].parse()?;
-    let max: i64 = doc["domain.max"].parse()?;
-    if min > max {
-        bail!("invalid domain: {min}..{max}");
+
+    let input = &doc["input.0.name"];
+    let kind_key = format!("domain.{input}.kind");
+    match doc.get(&kind_key).map(String::as_str) {
+        Some("unbounded") => {}
+        Some("range") => {
+            let min: i64 = doc
+                .get(&format!("domain.{input}.min"))
+                .context("range domain misses min")?
+                .parse()?;
+            let max: i64 = doc
+                .get(&format!("domain.{input}.max"))
+                .context("range domain misses max")?
+                .parse()?;
+            if min > max {
+                bail!("invalid range domain: {min}..{max}");
+            }
+        }
+        Some(other) => bail!("unsupported domain kind: {other}"),
+        None => bail!("missing domain kind for input {input}"),
     }
-    if !doc.keys().any(|k| k.starts_with("ensures.")) {
-        bail!("specification has no ensures clauses");
-    }
+
     Ok(())
 }
 
 fn canonicalize(doc: &BTreeMap<String, String>) -> String {
-    let mut s = String::from("AXIOM-IR/1\n");
-    for (k, v) in doc {
-        s.push_str(k);
-        s.push('=');
-        s.push_str(v.trim());
-        s.push('\n');
+    let mut out = String::from("AXIOM-IR/2\n");
+    for (key, value) in doc {
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value.trim());
+        out.push('\n');
     }
-    s
+    out
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
+fn domain_summary(doc: &BTreeMap<String, String>) -> Result<String> {
+    let input = &doc["input.0.name"];
+    let kind = doc
+        .get(&format!("domain.{input}.kind"))
+        .context("missing domain kind")?;
+    if kind == "unbounded" {
+        return Ok("unbounded integers".to_owned());
+    }
+    Ok(format!(
+        "{}..{}",
+        doc[&format!("domain.{input}.min")],
+        doc[&format!("domain.{input}.max")]
+    ))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
-        .map(|b| format!("{b:02x}"))
+        .map(|byte| format!("{byte:02x}"))
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn rejects_duplicate_keys() {
-        assert!(parse("AXIOM-IR/1\nmodule=a\nmodule=b\n").is_err());
+    fn validates_unbounded_document() {
+        let doc = parse(
+            "AXIOM-IR/2\nmodule=a\ninput.0.name=x\ninput.0.type=int\noutput.name=result\noutput.type=int\ndomain.x.kind=unbounded\nensures.0.expr=result == x\n",
+        )
+        .unwrap();
+        assert!(validate(&doc).is_ok());
     }
 }

@@ -1,8 +1,8 @@
 [package]
 name = "axiom-ir"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Canonical Axiom IR inspector and validator"
+description = "Canonical AXIOM-IR/2 validator and hashing utility"
 license = "MIT"
 publish = false
 
